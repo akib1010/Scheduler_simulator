@@ -42,18 +42,16 @@ struct QUEUE
     int size;
 };
 typedef struct QUEUE Queue;
-////Global variables
 Queue* sjfQ;
-Queue* mlfqP1;
-Queue* mlfqP2;
-Queue* mlfqP3;
 task* doneTasks[TASK_LIMIT];
 int doneCount=0;
 int sjf;
 int numCPU;
-int tasksComplete=0;
 int numTasks=0;
+int taskAvailable=0;
+task* sjfTask;
 pthread_mutex_t sjfMutex;
+pthread_mutex_t m0;
 pthread_mutex_t m1;
 pthread_mutex_t m2;
 pthread_cond_t sjfCond;
@@ -179,103 +177,20 @@ task* dequeue(Queue* myQ)
     }
     return result;
 }
-
 //////////////////////////////////
 ////Fucntions used for sjf scheduler
 //////////////////////////////////
-
-////Checks if a task is finished or needs to be rescheduled
-//void sjfReschedule(task* currTask)
-//{
-//    //If the work is finished move the task to done area
-//    if(currTask->length==0)
-//    {
-//        //Get the exit time
-//        clock_gettime(CLOCK_REALTIME, &(currTask->end));
-//        doneTasks[doneCount]=currTask;
-//        doneCount++;
-//        //If all the tasks added are complete
-//        if(doneCount==numTasks)
-//        {
-//            tasksComplete=1;
-//        }
-//    }
-//    else
-//    {
-//        sortEnqueue(sjfQ, currTask);
-//    }
-//    //Signal the scheduler if the task is rescheduled
-//    pthread_cond_signal(&sjfCond);
-//}
-//
-////The sjf scheduler which runs the process according to the policy
-//void* sjfScheduler(void* args)
-//{
-//    task* currTask;
-//    int io_result;
-//    int pre_io;
-//    int workTime;
-//    srand(time(0));
-//    while(tasksComplete==0)
-//    {
-//        pthread_mutex_lock(&sjfMutex);
-//        //printf("threads\n");
-//        //Check if any task has been rescheduled if the queue is empty
-//        while(sjfQ->size==0)
-//        {
-//            pthread_cond_wait(&sjfCond, &sjfMutex);
-//        }
-//        //get the task
-//        currTask=dequeue(sjfQ);
-//        if(currTask!=NULL)
-//        {
-//            //Check if the task is getting its first access
-//            if(currTask->accessed==0)
-//            {
-//                //Record the time of first access
-//                clock_gettime(CLOCK_REALTIME, &(currTask->firstAccess));
-//                currTask->accessed=1;
-//            }
-//            //Check if the task will do I/O
-//            io_result=rand() % 101;
-//            //If the task is not doing I/O
-//            if(io_result>currTask->odds_of_IO)
-//            {
-//                //Work for the duration of the task
-//                workTime=currTask->length;
-//                currTask->length=0;
-//            }
-//            else
-//            {
-//                pre_io=rand() % (TIME_SLICE+1);
-//                //work for the pre_io duration or length of the task (which ever is lower)
-//                if(pre_io>=currTask->length)
-//                {
-//                    workTime=currTask->length;
-//                    currTask->length=0;
-//                }
-//                else
-//                {
-//                    workTime=pre_io;
-//                    currTask->length=currTask->length-pre_io;
-//                }
-//            }
-//            sjfReschedule(currTask);
-//            pthread_mutex_unlock(&sjfMutex);
-//            //This fucntion is put outside the lock so that threads do not have to wait while other threads are working
-//            microsleep(workTime);
-//        }
-//        pthread_mutex_unlock(&sjfMutex);
-//    }
-//    return args;
-//}
-
 void run_sjf_task(task* currTask)
 {
+//    pthread_mutex_lock(&m0);
+//    printf("\nName: %s , Length: %d ---- Name: %s, Length: %d",sjfTask->name,sjfTask->length,currTask->name,currTask->length);
+//    pthread_mutex_unlock(&m0);
+//    printf("\nName: %s, Length: %d",sjfTask->name,sjfTask->length);
     int io_result;
     int pre_io;
     int workTime;
     srand(time(0));
+    pthread_mutex_lock(&m0);
     //Check if the task is getting its first access
     if(currTask->accessed==0)
     {
@@ -286,68 +201,73 @@ void run_sjf_task(task* currTask)
     //Check if the task will do I/O
     io_result=rand() % 101;
     //If the task is not doing I/O
-    if(io_result>currTask->odds_of_IO)
+    if(io_result > currTask->odds_of_IO)
     {
-        //Work for the duration of the task
+        //amount of time the task should work
         workTime=currTask->length;
         currTask->length=0;
-        microsleep(workTime);
-        //Get the exit time
-        clock_gettime(CLOCK_REALTIME, &(currTask->end));
-        doneTasks[doneCount]=currTask;
-        doneCount++;
-        
     }
+    //If it is doing I/O
     else
     {
         pre_io=rand() % (TIME_SLICE+1);
         //work for the pre_io duration or length of the task (which ever is lower)
-        if(pre_io>=currTask->length)
+        if(pre_io >= currTask->length)
         {
             workTime=currTask->length;
             currTask->length=0;
-            microsleep(workTime);
-            //Get the exit time
-            clock_gettime(CLOCK_REALTIME, &(currTask->end));
-            doneTasks[doneCount]=currTask;
-            doneCount++;
         }
         else
         {
             workTime=pre_io;
-            currTask->length=currTask->length-pre_io;
-            microsleep(workTime);
-            //Add the task back to the queue
-            sortEnqueue(sjfQ, currTask);
-            numTasks++;
-            pthread_cond_signal(&sjfCond);
+            currTask->length=currTask->length - pre_io;
         }
     }
+    pthread_mutex_unlock(&m0);
+    microsleep(currTask->length);
+    pthread_mutex_lock(&m2);
+    if(currTask->length==0)
+    {
+        doneTasks[doneCount]=currTask;
+        doneCount++;
+    }
+    else
+    {
+        sortEnqueue(sjfQ,currTask);
+        numTasks--;
+    }
+    pthread_mutex_unlock(&m2);
 }
 
-//The sjf scheduler which runs the process according to the policy
-void* sjfScheduler(void* args)
+void sjfScheduler()
 {
-    task* currTask;
-    while(1)
+    pthread_mutex_lock(&m1);
+    if(doneCount<TASK_LIMIT)
+    {
+        taskAvailable=1;
+        sjfTask=dequeue(sjfQ);
+        pthread_cond_signal(&sjfCond);
+    }
+    pthread_mutex_unlock(&m1);
+}
+
+void* sjfDispatcher(void* argc)
+{
+    while(numTasks<TASK_LIMIT-1)
     {
         pthread_mutex_lock(&sjfMutex);
-        while(numTasks==0)
+        while(taskAvailable==0)
         {
-            pthread_cond_wait(&sjfCond, &sjfMutex);
+            pthread_cond_wait(&sjfCond,&sjfMutex);
         }
-        currTask=dequeue(sjfQ);
-        numTasks--;
+        numTasks++;
+        run_sjf_task(sjfTask);
         pthread_mutex_unlock(&sjfMutex);
-        
-        if(currTask!=NULL)
-        {
-            //This function is called outside the lock so that threads can work concurrently
-            run_sjf_task(currTask);
-        }
+        sjfScheduler();
     }
-    return args;
+    return argc;
 }
+
 
 //////////////////////////////////
 ////Fucntions for reading and printing
@@ -381,9 +301,8 @@ void parseLine(char* line)
     }
     else
     {
-        enqueue(mlfqP1, newTask);
+        
     }
-    numTasks++;
 }
 
 
@@ -430,7 +349,6 @@ struct timespec diff(struct timespec start,struct timespec end)
     }
     return temp;
 }
-
 
 //Print the report
 void printReport()
@@ -500,72 +418,59 @@ int main(int argc, char* argv[])
     assert(argc>0);
     int i;
     numCPU=atoi(argv[1]);
-    
-    //For sjf policy
     if(strcmp(argv[2],"sjf")==0)
     {
         sjf=1;
         sjfQ=createQueue();
     }
-    //For mlfq policy
-    if(strcmp(argv[2],"mlfq")==0)
-    {
-        sjf=0;
-        mlfqP1=createQueue();
-        mlfqP2=createQueue();
-        mlfqP3=createQueue();
-    }
-    //Create the threads and start running the scheduler
-    pthread_t threads[numCPU];
-    //Load the list of tasks
+    //////////
+    //////////
     if(readTasks()==1)
     {
-        //Run sjf policy
+        //Get the number of threads needed
+        pthread_t threads[numCPU];
         if(sjf==1)
         {
-            //Initialize the mutex and conditions
+            //Initialize thread, mutex and condition
             pthread_mutex_init(&sjfMutex,NULL);
+            pthread_mutex_init(&m0,NULL);
+            pthread_mutex_init(&m1,NULL);
+            pthread_mutex_init(&m2,NULL);
             pthread_cond_init(&sjfCond,NULL);
-//            sjfMutex=(pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-//            m1=(pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-//            m2=(pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-//            sjfCond=(pthread_cond_t)PTHREAD_COND_INITIALIZER;
             for(i=0;i<numCPU;i++)
             {
-                if(pthread_create(&threads[i],NULL,&sjfScheduler,NULL)!=0)
+                if(pthread_create(&threads[i],NULL,&sjfDispatcher,NULL)!=0)
                 {
                     printf("\nFailed to make threads.\n");
                 }
             }
-        }
-        //Run mlfq policy
-        else
-        {
-            //
-            //
-            //
-            //
-            //
-            //
-            //
-            //
-        }
-        //Join thr threads
-        for(i=0;i<numCPU;i++)
-        {
-            if(pthread_join(threads[i],NULL)!=0)
+            sjfScheduler();
+            for(i=0;i<numCPU;i++)
             {
-                printf("\nThreads did not join!\n");
+                if(pthread_join(threads[i],NULL)!=0)
+                {
+                    printf("\nThreads failed to join.\n");
+                }
             }
         }
-    }
-    else
-    {
-        printf("\nCould not read the file tasks.txt\n");
+        
     }
     printReport();
-    pthread_mutex_destroy(&sjfMutex);
-    pthread_cond_destroy(&sjfCond);
-    pthread_mutex_destroy(&m1);
     return EXIT_SUCCESS;
 }
+
+//            task* curr=dequeue(sjfQ);
+//            int count=0;
+//            while(curr!=NULL)
+//            {
+//                printf("Name: %s, type: %d, length: %d, odds: %d\n",curr->name,curr->type,curr->length,curr->odds_of_IO);
+//                if(count==0)
+//                {
+//                    task* temp=createTask("Test", 4, 20, 50);
+//                    sortEnqueue(sjfQ,temp);
+//                }
+//                curr=dequeue(sjfQ);
+//                count++;
+//            }
+//            printf("Total NumTasks: %d\n",numTasks);
+//            printf("Queue Size: %d\n",sjfQ->size);
