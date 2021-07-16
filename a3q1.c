@@ -13,6 +13,7 @@
 #define MAX_CHAR 100//Maximum characters of a single task
 #define TASK_LIMIT 100//The file will not have more than 100 tasks
 #define TIME_SLICE 50
+#define TIME_ALLOTMENT 200
 
 //////////////////////////////////
 ////Data Structures
@@ -27,6 +28,7 @@ struct TASK
     struct timespec end;
     struct timespec firstAccess;
     int accessed;
+    int runTime;
 };
 typedef struct TASK task;
 struct NODE
@@ -41,21 +43,35 @@ struct QUEUE
     Node* end;
     int size;
 };
+
+////Global Variables//////
+
 typedef struct QUEUE Queue;
 Queue* sjfQ;
 task* doneTasks[TASK_LIMIT];
 int doneCount=0;
 int sjf;
 int numCPU;
-int numTasks=0;
+int sjfTasksDone=0;
 int taskAvailable=0;
-task* sjfTask;
+int printed=0;
+//task* sjfTask;
 pthread_mutex_t sjfMutex;
 pthread_mutex_t m0;
 pthread_mutex_t m1;
 pthread_mutex_t m2;
 pthread_cond_t sjfCond;
+///////////////////////
+Queue* mlfq1;
+Queue* mlfq2;
+Queue* mlfq3;
+pthread_mutex_t mlfqMutex;
+pthread_cond_t mlfqCond;
+int mlfqTasksDone=0;
+struct timespec timeCheck;
 
+
+void printReport();
 //Given function for working
 static void microsleep(unsigned int usecs)
 {
@@ -69,6 +85,21 @@ static void microsleep(unsigned int usecs)
         // need to loop, `nanosleep` might return before sleeping
         // for the complete time (see `man nanosleep` for details)
     } while (ret == -1 && (t.tv_sec || t.tv_nsec));
+}
+
+//Copied from Guy Rutenbergs blog post
+//This function is to calculate the difference in 2 different timespec structs
+struct timespec diff(struct timespec start,struct timespec end)
+{
+    struct timespec temp;
+    if ((end.tv_nsec-start.tv_nsec)<0) {
+        temp.tv_sec = end.tv_sec-start.tv_sec-1;
+        temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
+    } else {
+        temp.tv_sec = end.tv_sec-start.tv_sec;
+        temp.tv_nsec = end.tv_nsec-start.tv_nsec;
+    }
+    return temp;
 }
 
 //////////////////////////////////
@@ -163,16 +194,21 @@ task* dequeue(Queue* myQ)
     task* result=NULL;
     if(myQ->size==0)
     {
-        printf("\nQueue is Empty!\n");
+        //Do nothing Queue is Empty
     }
     else
     {
-        Node* temp=myQ->front;
-        if(myQ->front!=NULL)
+        if(myQ->front->next!=NULL)
         {
+            Node* temp=myQ->front;
             myQ->front=myQ->front->next;
-            myQ->size--;
             result=temp->data;
+            myQ->size--;
+        }
+        else
+        {
+            result=myQ->front->data;
+            myQ->size=0;
         }
     }
     return result;
@@ -182,15 +218,10 @@ task* dequeue(Queue* myQ)
 //////////////////////////////////
 void run_sjf_task(task* currTask)
 {
-//    pthread_mutex_lock(&m0);
-//    printf("\nName: %s , Length: %d ---- Name: %s, Length: %d",sjfTask->name,sjfTask->length,currTask->name,currTask->length);
-//    pthread_mutex_unlock(&m0);
-//    printf("\nName: %s, Length: %d",sjfTask->name,sjfTask->length);
     int io_result;
     int pre_io;
     int workTime;
     srand(time(0));
-    pthread_mutex_lock(&m0);
     //Check if the task is getting its first access
     if(currTask->accessed==0)
     {
@@ -220,54 +251,270 @@ void run_sjf_task(task* currTask)
         else
         {
             workTime=pre_io;
-            currTask->length=currTask->length - pre_io;
+            currTask->length= currTask->length - pre_io;
         }
     }
-    pthread_mutex_unlock(&m0);
-    microsleep(currTask->length);
-    pthread_mutex_lock(&m2);
+    microsleep(workTime);
+    pthread_mutex_lock(&m0);
     if(currTask->length==0)
     {
+        clock_gettime(CLOCK_REALTIME, &(currTask->end));
         doneTasks[doneCount]=currTask;
         doneCount++;
     }
     else
     {
         sortEnqueue(sjfQ,currTask);
-        numTasks--;
+        sjfTasksDone--;
     }
-    pthread_mutex_unlock(&m2);
+    pthread_mutex_unlock(&m0);
 }
 
-void sjfScheduler()
+
+task* sjfScheduler()
 {
+    task* result=NULL;
     pthread_mutex_lock(&m1);
-    if(doneCount<TASK_LIMIT)
+    if(taskAvailable==0)
     {
         taskAvailable=1;
-        sjfTask=dequeue(sjfQ);
         pthread_cond_signal(&sjfCond);
     }
+    else
+    {
+        if(sjfTasksDone<TASK_LIMIT)
+        {
+            result=dequeue(sjfQ);
+        }
+    }
     pthread_mutex_unlock(&m1);
+    return result;
 }
+
 
 void* sjfDispatcher(void* argc)
 {
-    while(numTasks<TASK_LIMIT-1)
+    task* sjfTask;
+   // pthread_mutex_lock(&sjfMutex);
+    while(sjfTasksDone<TASK_LIMIT)
     {
         pthread_mutex_lock(&sjfMutex);
         while(taskAvailable==0)
         {
             pthread_cond_wait(&sjfCond,&sjfMutex);
         }
-        numTasks++;
-        run_sjf_task(sjfTask);
-        pthread_mutex_unlock(&sjfMutex);
-        sjfScheduler();
+        sjfTasksDone++;
+        if(sjfTasksDone==TASK_LIMIT)
+        {
+            printReport();
+        }
+        sjfTask=sjfScheduler();
+        if(sjfTask!=NULL)
+        {
+            run_sjf_task(sjfTask);
+        }
+       pthread_mutex_unlock(&sjfMutex);
     }
+    //pthread_mutex_unlock(&sjfMutex);
     return argc;
 }
 
+
+
+//////////////////////////////////
+////Fucntions used for mlfq scheduler
+//////////////////////////////////
+void changePriority()
+{
+    task* currTask;
+    //Check the medium priority queue
+    if(mlfq2->size != 0)
+    {
+        //Put everything from medium queue to high priority queue
+        currTask=dequeue(mlfq2);
+        while(currTask!=NULL)
+        {
+            currTask->runTime=0;
+            enqueue(mlfq1,currTask);
+            currTask=dequeue(mlfq2);
+        }
+    }
+    //Check the low priority queue
+    if(mlfq3->size != 0)
+    {
+        //Put everything from low queue to high priority queue
+        currTask=dequeue(mlfq3);
+        while(currTask!=NULL)
+        {
+            currTask->runTime=0;
+            enqueue(mlfq1,currTask);
+            currTask=dequeue(mlfq3);
+        }
+    }
+}
+void timeUpdate(struct timespec initTime)
+{
+    struct timespec currTime;
+    struct timespec difference;
+    int microsec;
+    clock_gettime(CLOCK_REALTIME,&currTime);
+    difference=diff(initTime,currTime);
+    microsec=(difference.tv_sec/1000000)+(difference.tv_nsec*0.001);
+    if(microsec >= 5000)
+    {
+        changePriority();
+        clock_gettime(CLOCK_REALTIME, &timeCheck);
+    }
+    
+}
+void run_mlfq_task(task* currTask)
+{
+    int io_result;
+    int pre_io;
+    int workTime;
+    srand(time(0));
+    //Check if the task is getting its first access
+    if(currTask->accessed==0)
+    {
+        //Record the time of first access
+        clock_gettime(CLOCK_REALTIME, &(currTask->firstAccess));
+        currTask->accessed=1;
+    }
+    //Check if the task will do I/O
+    io_result=rand() % 101;
+    //If the task is not doing I/O
+    if(io_result > currTask->odds_of_IO)
+    {
+        //If the length of the task is smaller than the time slice
+        if(TIME_SLICE >= currTask->length)
+        {
+            workTime=currTask->length;
+            currTask->length=0;
+        }
+        else
+        {
+            //Run the task according to the time slice
+            workTime=TIME_SLICE;
+            currTask->length=currTask->length - TIME_SLICE;
+        }
+    }
+    //If it is doing I/O
+    else
+    {
+        pre_io=rand() % (TIME_SLICE+1);
+        //work for the pre_io duration or length of the task (which ever is lower)
+        if(pre_io >= currTask->length)
+        {
+            workTime=currTask->length;
+            currTask->length=0;
+        }
+        else
+        {
+            workTime=pre_io;
+            currTask->length= currTask->length - pre_io;
+        }
+    }
+    currTask->runTime+=workTime;
+    microsleep(workTime);
+    pthread_mutex_lock(&m1);
+    //If the task is finished put it in the done area
+    if(currTask->length==0)
+    {
+        clock_gettime(CLOCK_REALTIME, &(currTask->end));
+        doneTasks[doneCount]=currTask;
+        doneCount++;
+    }
+    //Reschedule
+    else
+    {
+        //If the priority needs to be changed to medium
+        if(currTask->runTime > TIME_ALLOTMENT)
+        {
+            //if the priority needs to be changed to low
+            if(currTask->runTime > (2 * TIME_ALLOTMENT))
+            {
+                enqueue(mlfq3,currTask);
+            }
+            else
+            {
+                enqueue(mlfq2,currTask);
+            }
+        }
+        else
+        {
+            enqueue(mlfq1,currTask);
+        }
+        mlfqTasksDone--;
+    }
+    pthread_mutex_unlock(&m1);
+    
+}
+
+task* mlfqScheduler()
+{
+    task* result=NULL;
+    pthread_mutex_lock(&m0);
+    if(taskAvailable==0)
+    {
+        taskAvailable=1;
+        pthread_cond_signal(&mlfqCond);
+    }
+    else
+    {
+        //Check if 5000 usecs passed
+        timeUpdate(timeCheck);
+        //If there is no task in queue 1 (most priority)
+        if(mlfq1->size==0)
+        {
+            //If there is no task in queue 2 (medium priority)
+            if(mlfq2->size==0)
+            {
+                //Get a task from mlfq3(least priority)
+                {
+                    result=dequeue(mlfq3);
+                }
+            }
+            //Get a task from mlfq2 (medium priority)
+            else
+            {
+                result=dequeue(mlfq2);
+            }
+        }
+        //Get a task from mlfq1 (most priority)
+        else
+        {
+            result=dequeue(mlfq1);
+        }
+        
+    }
+    pthread_mutex_unlock(&m0);
+    return result;
+}
+void* mlfqDispatcher(void* argc)
+{
+    task* curr;
+    //Change with doneCount
+    while(mlfqTasksDone<TASK_LIMIT)
+    {
+        pthread_mutex_lock(&mlfqMutex);
+        while(taskAvailable==0)
+        {
+            pthread_cond_wait(&mlfqCond,&mlfqMutex);
+        }
+        mlfqTasksDone++;
+        curr=mlfqScheduler();
+        if(curr!=NULL)
+        {
+            run_mlfq_task(curr);
+        }
+        if(mlfqTasksDone==TASK_LIMIT)
+        {
+            printReport();
+        }
+        pthread_mutex_unlock(&mlfqMutex);
+    }
+    return argc;
+}
 
 //////////////////////////////////
 ////Fucntions for reading and printing
@@ -282,6 +529,7 @@ task* createTask(char* name, int type, int length, int odds_of_IO)
     result->length=length;
     result->odds_of_IO=odds_of_IO;
     result->accessed=0;
+    result->runTime=0;
     //Get the arrival time
     clock_gettime(CLOCK_REALTIME, &(result->start));
     return result;
@@ -297,11 +545,13 @@ void parseLine(char* line)
     task* newTask=createTask(name,type,length,odds);
     if(sjf==1)
     {
+        //Use the sorted enqueue function to add the new task to the queue
         sortEnqueue(sjfQ, newTask);
     }
     else
     {
-        
+        //All new tasks have the highest priority so they go into mlfq1
+        enqueue(mlfq1, newTask);
     }
 }
 
@@ -335,24 +585,11 @@ int readTasks()
     return result;
 }
 
-//Copied from Guy Rutenbergs blog post
-//This function is to calculate the difference in 2 different timespec structs
-struct timespec diff(struct timespec start,struct timespec end)
-{
-    struct timespec temp;
-    if ((end.tv_nsec-start.tv_nsec)<0) {
-        temp.tv_sec = end.tv_sec-start.tv_sec-1;
-        temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
-    } else {
-        temp.tv_sec = end.tv_sec-start.tv_sec;
-        temp.tv_nsec = end.tv_nsec-start.tv_nsec;
-    }
-    return temp;
-}
 
 //Print the report
 void printReport()
 {
+    printed=1;
     int tt_typ0=0,tt_typ1=0,tt_typ2=0,tt_typ3=0;
     int rr_typ0=0,rr_typ1=0,rr_typ2=0,rr_typ3=0;
     int type0=0,type1=0,type2=0,type3=0;
@@ -418,10 +655,18 @@ int main(int argc, char* argv[])
     assert(argc>0);
     int i;
     numCPU=atoi(argv[1]);
+    //If we have to do sjf policy, initialize the sjf Queue
     if(strcmp(argv[2],"sjf")==0)
     {
         sjf=1;
         sjfQ=createQueue();
+    }
+    //Else initialize all the queues needed for mlfq policy
+    else
+    {
+        mlfq1=createQueue();
+        mlfq2=createQueue();
+        mlfq3=createQueue();
     }
     //////////
     //////////
@@ -429,13 +674,13 @@ int main(int argc, char* argv[])
     {
         //Get the number of threads needed
         pthread_t threads[numCPU];
+        //If we are running the sjf policy
         if(sjf==1)
         {
             //Initialize thread, mutex and condition
             pthread_mutex_init(&sjfMutex,NULL);
             pthread_mutex_init(&m0,NULL);
             pthread_mutex_init(&m1,NULL);
-            pthread_mutex_init(&m2,NULL);
             pthread_cond_init(&sjfCond,NULL);
             for(i=0;i<numCPU;i++)
             {
@@ -444,33 +689,56 @@ int main(int argc, char* argv[])
                     printf("\nFailed to make threads.\n");
                 }
             }
+            //Start
             sjfScheduler();
+        }
+        //Running the mlfq policy
+        else
+        {
+            pthread_mutex_init(&mlfqMutex,NULL);
+            pthread_mutex_init(&m0,NULL);
+            pthread_mutex_init(&m1,NULL);
+            pthread_cond_init(&mlfqCond,NULL);
             for(i=0;i<numCPU;i++)
             {
-                if(pthread_join(threads[i],NULL)!=0)
+                if(pthread_create(&threads[i],NULL,&mlfqDispatcher,NULL)!=0)
                 {
-                    printf("\nThreads failed to join.\n");
+                    printf("\nFailed to make threads.\n");
                 }
+            }
+            //Get the time when the scheduler is starting
+            clock_gettime(CLOCK_REALTIME, &timeCheck);
+            //Start
+            mlfqScheduler();
+        }
+        
+        //Join the threads
+        for(i=0;i<numCPU;i++)
+        {
+            if(pthread_join(threads[i],NULL)!=0)
+            {
+                printf("\nThreads failed to join.\n");
             }
         }
         
     }
-    printReport();
+    if(sjf==1)
+    {
+        pthread_mutex_destroy(&sjfMutex);
+        pthread_mutex_destroy(&m0);
+        pthread_mutex_destroy(&m1);
+        pthread_cond_destroy(&sjfCond);
+    }
+    else
+    {
+        pthread_mutex_destroy(&mlfqMutex);
+        pthread_mutex_destroy(&m0);
+        pthread_mutex_destroy(&m1);
+        pthread_cond_destroy(&mlfqCond);
+    }
+    if(printed==0)
+    {
+       printReport();
+    }
     return EXIT_SUCCESS;
 }
-
-//            task* curr=dequeue(sjfQ);
-//            int count=0;
-//            while(curr!=NULL)
-//            {
-//                printf("Name: %s, type: %d, length: %d, odds: %d\n",curr->name,curr->type,curr->length,curr->odds_of_IO);
-//                if(count==0)
-//                {
-//                    task* temp=createTask("Test", 4, 20, 50);
-//                    sortEnqueue(sjfQ,temp);
-//                }
-//                curr=dequeue(sjfQ);
-//                count++;
-//            }
-//            printf("Total NumTasks: %d\n",numTasks);
-//            printf("Queue Size: %d\n",sjfQ->size);
