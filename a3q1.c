@@ -47,7 +47,6 @@ struct QUEUE
 ////Global Variables//////
 
 typedef struct QUEUE Queue;
-Queue* sjfQ;
 task* doneTasks[TASK_LIMIT];
 int doneCount=0;
 int sjf;
@@ -55,7 +54,8 @@ int numCPU;
 int sjfTasksDone=0;
 int taskAvailable=0;
 int printed=0;
-//task* sjfTask;
+///////////////////////
+Queue* sjfQ;
 pthread_mutex_t sjfMutex;
 pthread_mutex_t m0;
 pthread_mutex_t m1;
@@ -216,6 +216,8 @@ task* dequeue(Queue* myQ)
 //////////////////////////////////
 ////Fucntions used for sjf scheduler
 //////////////////////////////////
+
+//This function executes the current task and reschedules the task or sends it to the done area
 void run_sjf_task(task* currTask)
 {
     int io_result;
@@ -254,6 +256,7 @@ void run_sjf_task(task* currTask)
             currTask->length= currTask->length - pre_io;
         }
     }
+    //Work for the time calculated
     microsleep(workTime);
     pthread_mutex_lock(&m0);
     if(currTask->length==0)
@@ -270,7 +273,7 @@ void run_sjf_task(task* currTask)
     pthread_mutex_unlock(&m0);
 }
 
-
+//This function returns the next task that needs to be run
 task* sjfScheduler()
 {
     task* result=NULL;
@@ -291,7 +294,7 @@ task* sjfScheduler()
     return result;
 }
 
-
+//This fucntion gets the next task from the scheduler and executes it
 void* sjfDispatcher(void* argc)
 {
     task* sjfTask;
@@ -324,6 +327,8 @@ void* sjfDispatcher(void* argc)
 //////////////////////////////////
 ////Fucntions used for mlfq scheduler
 //////////////////////////////////
+
+//This function is used to change the priority of all the tasks to high priority
 void changePriority()
 {
     task* currTask;
@@ -352,6 +357,8 @@ void changePriority()
         }
     }
 }
+
+//This fucntion is used to check if the program has been running for 5000 usecs and change the priority of the tasks if it did
 void timeUpdate(struct timespec initTime)
 {
     struct timespec currTime;
@@ -367,6 +374,7 @@ void timeUpdate(struct timespec initTime)
     }
     
 }
+//This fucntion is used to execute the task and reschedule it
 void run_mlfq_task(task* currTask)
 {
     int io_result;
@@ -450,6 +458,7 @@ void run_mlfq_task(task* currTask)
     
 }
 
+//This function returns the next task that needs to be executed
 task* mlfqScheduler()
 {
     task* result=NULL;
@@ -490,6 +499,7 @@ task* mlfqScheduler()
     pthread_mutex_unlock(&m0);
     return result;
 }
+//This function gets the next task from the scheduler and executes it
 void* mlfqDispatcher(void* argc)
 {
     task* curr;
@@ -668,8 +678,6 @@ int main(int argc, char* argv[])
         mlfq2=createQueue();
         mlfq3=createQueue();
     }
-    //////////
-    //////////
     if(readTasks()==1)
     {
         //Get the number of threads needed
@@ -722,6 +730,7 @@ int main(int argc, char* argv[])
         }
         
     }
+    //Destroy the mutex's used
     if(sjf==1)
     {
         pthread_mutex_destroy(&sjfMutex);
@@ -736,6 +745,7 @@ int main(int argc, char* argv[])
         pthread_mutex_destroy(&m1);
         pthread_cond_destroy(&mlfqCond);
     }
+    //If the report is not printed already
     if(printed==0)
     {
        printReport();
