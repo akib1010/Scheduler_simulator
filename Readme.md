@@ -1,4 +1,4 @@
-# Assignment 3
+
 * Compile the program by typing 'make'
 * run the program by typing './a3q1 <Number of CPUS> <sjf/mlfq>'
 * type 'make clean' to clean up
